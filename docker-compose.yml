@@ -1,0 +1,103 @@
+# ORGOS.AI — sovereign AI stack (MVP)
+# Open WebUI (co-branded UI) + vLLM (open-weight model) + Postgres/pgvector (app DB + RAG)
+#
+# GPU server:   docker compose --profile gpu up -d
+# CPU / CI:     docker compose --env-file .env.ci --profile cpu up -d   (small model via Ollama)
+# Mac / dev:    run Ollama natively, set OPENAI_API_BASE_URL in .env, then: docker compose up -d
+
+services:
+  ollama:
+    profiles: ["cpu"]
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      retries: 20
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: orgos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: orgos
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orgos"]
+      interval: 5s
+      retries: 10
+
+  vllm:
+    profiles: ["gpu"]
+    image: vllm/vllm-openai:${VLLM_VERSION:-v0.31.0}
+    restart: unless-stopped
+    ipc: host
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    command: >
+      --model ${LLM_MODEL:-Qwen/Qwen3-8B}
+      --served-model-name orgos-default
+      --max-model-len ${LLM_MAX_LEN:-32768}
+      --enable-auto-tool-choice
+      --tool-call-parser hermes
+      --api-key ${VLLM_API_KEY:?set in .env}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-v0.12.0}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${WEBUI_PORT:-3000}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Branding (license requires "Open WebUI" attribution to remain visible — co-branding)
+      WEBUI_NAME: ${WEBUI_NAME:-ORGOS.AI}
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?set in .env}
+
+      # Model backend: OpenAI-compatible only (vLLM on GPU, or native Ollama on Mac)
+      ENABLE_OLLAMA_API: "false"
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-http://vllm:8000/v1}
+      OPENAI_API_KEY: ${VLLM_API_KEY}
+
+      # Storage + RAG on Postgres/pgvector
+      DATABASE_URL: postgresql://orgos:${POSTGRES_PASSWORD}@postgres:5432/orgos
+      VECTOR_DB: pgvector
+      PGVECTOR_DB_URL: postgresql://orgos:${POSTGRES_PASSWORD}@postgres:5432/orgos
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-BAAI/bge-m3}
+      ENABLE_RAG_HYBRID_SEARCH: "true"
+
+      # Access control: no open signup; admin approves users
+      ENABLE_SIGNUP: "false"
+      DEFAULT_USER_ROLE: pending
+      ENABLE_COMMUNITY_SHARING: "false"
+
+      # Sovereignty: no telemetry / phone-home
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+      ENABLE_VERSION_UPDATE_CHECK: "false"
+    volumes:
+      - webui-data:/app/backend/data
+
+volumes:
+  ollama:
+  pgdata:
+  hf-cache:
+  webui-data:
