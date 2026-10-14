@@ -8,11 +8,20 @@ ENV_FILE=.env.ci
 set -a; source "$ENV_FILE"; set +a
 COMPOSE=(docker compose --env-file "$ENV_FILE" --profile cpu)
 
-cleanup() { [[ "${1:-}" == "--keep" ]] || "${COMPOSE[@]}" down -v; }
+cleanup() {
+  local rc=$?
+  if (( rc != 0 )); then
+    echo "::group::container status and logs (failure rc=$rc)"
+    "${COMPOSE[@]}" ps -a || true
+    "${COMPOSE[@]}" logs --tail 80 || true
+    echo "::endgroup::"
+  fi
+  [[ "${1:-}" == "--keep" ]] || "${COMPOSE[@]}" down -v
+}
 trap 'cleanup "${KEEP:-}"' EXIT
 [[ "${1:-}" == "--keep" ]] && KEEP=--keep
 
-"${COMPOSE[@]}" up -d ollama postgres
+"${COMPOSE[@]}" up -d --wait ollama postgres
 echo "Pulling $TEST_MODEL ..."
 "${COMPOSE[@]}" exec -T ollama ollama pull "$TEST_MODEL"
 
